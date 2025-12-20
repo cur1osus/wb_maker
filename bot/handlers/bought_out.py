@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Final
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import FSInputFile, ReplyKeyboardRemove
+from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
 
 from bot.db.models import UserManager
@@ -45,7 +45,9 @@ async def _processing_keyboard():
 
 
 def _user_id(user: UserManager, message: Message) -> int:
-    return getattr(user, "id_user", None) or (message.from_user.id if message.from_user else 0)
+    return getattr(user, "id_user", None) or (
+        message.from_user.id if message.from_user else 0
+    )
 
 
 def _render_queue(paths: list[str]) -> str:
@@ -121,7 +123,7 @@ async def cancel(
     redis: Redis | None = None,
 ) -> None:
     await fn.state_clear(state)
-    await message.answer("Отменено", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Отменено")
     await fn.show_main_menu(message, state)
 
 
