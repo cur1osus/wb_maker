@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -21,6 +22,7 @@ from bot.keyboards.reply import (
 )
 from bot.states import UserState
 from bot.utils import fn
+from bot.utils.on_review import remove_on_review_badge
 from bot.utils.process_bought_out import (
     clear_dirs_bought_out,
     ensure_user_dirs,
@@ -38,10 +40,20 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS: Final[set[str]] = {".png", ".jpg", ".jpeg"}
 FILES_PREVIEW_LIMIT: Final[int] = 20
+REVIEW_LABEL: Final[str] = "На проверке"
+REVIEW_SELECTED_PREFIX: Final[str] = "✅ "
+STATE_KEY_REVIEW: Final[str] = "bo_use_review"
 
 
-async def _processing_keyboard():
-    return await rk_processing()
+async def _review_enabled(state: FSMContext) -> bool:
+    data = await state.get_data()
+    return bool(data.get(STATE_KEY_REVIEW, False))
+
+
+async def _processing_keyboard(state: FSMContext):
+    review_on = await _review_enabled(state)
+    label = f"{REVIEW_SELECTED_PREFIX}{REVIEW_LABEL}" if review_on else REVIEW_LABEL
+    return await rk_processing([label])
 
 
 def _user_id(user: UserManager, message: Message) -> int:
@@ -98,11 +110,13 @@ async def _start_bought_out(
 ) -> None:
     await fn.state_clear(state)
     await state.set_state(UserState.send_files_bo)
+    await state.update_data({STATE_KEY_REVIEW: False})
     intro = (
         "Загрузите PNG/JPG с плашкой «ОТКАЗАЛИСЬ» как документ, затем жмите «🚀 Старт».\n"
+        "⚙️ Кнопка «На проверке» — включить/выключить удаление этой плашки.\n"
         "📂 «Файлы» — очередь, 🧹 «Очистить» — удалить загруженное."
     )
-    await message.answer(intro, reply_markup=await _processing_keyboard())
+    await message.answer(intro, reply_markup=await _processing_keyboard(state))
 
 
 @router.message(F.text == BTN_MAIN_BOUGHT_OUT)
@@ -153,7 +167,7 @@ async def send_files(
     paths = get_paths(user_id)
     await message.answer(
         f"Файл {target.name} сохранен. В очереди {len(paths)}.",
-        reply_markup=await _processing_keyboard(),
+        reply_markup=await _processing_keyboard(state),
     )
 
 
@@ -165,7 +179,7 @@ async def show_queue(
     redis: Redis | None = None,
 ) -> None:
     text = _render_queue(get_paths(_user_id(user, message)))
-    await message.answer(text, reply_markup=await _processing_keyboard())
+    await message.answer(text, reply_markup=await _processing_keyboard(state))
 
 
 @router.message(UserState.send_files_bo, F.text == BTN_CLEAR)
@@ -177,7 +191,29 @@ async def clear_queue(
 ) -> None:
     clear_dirs_bought_out(_user_id(user, message))
     await message.answer(
-        "Очередь и результаты очищены.", reply_markup=await _processing_keyboard()
+        "Очередь и результаты очищены.", reply_markup=await _processing_keyboard(state)
+    )
+
+
+@router.message(
+    UserState.send_files_bo,
+    F.text.func(
+        lambda text: (text or "").replace(REVIEW_SELECTED_PREFIX, "").strip()
+        == REVIEW_LABEL
+    ),
+)
+async def toggle_review(
+    message: Message,
+    user: UserManager,
+    state: FSMContext,
+    redis: Redis | None = None,
+) -> None:
+    current = await _review_enabled(state)
+    await state.update_data({STATE_KEY_REVIEW: not current})
+    status = "включен" if not current else "выключен"
+    await message.answer(
+        f"Режим «На проверке» {status}.",
+        reply_markup=await _processing_keyboard(state),
     )
 
 
@@ -195,24 +231,62 @@ async def vu_start_cmd(
     if not len_paths:
         await message.answer(
             "Очередь пуста. Пришлите PNG/JPG как документ.",
-            reply_markup=await _processing_keyboard(),
+            reply_markup=await _processing_keyboard(state),
         )
         return
 
     resized_vykupili, new_h, new_w = init_source_bought_out()
-    msg = await message.answer(f"Обработка [0/{len_paths}]")
+    review_on = await _review_enabled(state)
+    clean_dir = output_dir / "_tmp_on_review"
+    if clean_dir.exists():
+        shutil.rmtree(clean_dir, ignore_errors=True)
+    clean_dir.mkdir(parents=True, exist_ok=True)
+
+    msg = await message.answer(
+        f"Обработка [0/{len_paths}] (На проверке={'ON' if review_on else 'OFF'})"
+    )
     success = 0
     for i, p in enumerate(paths, start=1):
-        if process_image_v(resized_vykupili, new_h, new_w, p, output_dir):
-            success += 1
-        await msg.edit_text(f"Обработка [{i}/{len_paths}]")
+        processed = process_image_v(resized_vykupili, new_h, new_w, p, clean_dir)
+        intermediate = clean_dir / Path(p).name
+        if not intermediate.exists():
+            intermediate = Path(p)
+
+        if review_on:
+            removed = remove_on_review_badge(str(intermediate), output_dir)
+            final_candidate = output_dir / Path(intermediate).name.lower()
+            if not final_candidate.exists() and intermediate.exists():
+                try:
+                    shutil.copy2(intermediate, final_candidate)
+                except OSError as exc:
+                    logger.warning(
+                        "Не удалось скопировать результат %s: %s", intermediate, exc
+                    )
+            if processed or removed:
+                success += 1
+        else:
+            final_candidate = output_dir / Path(intermediate).name
+            try:
+                shutil.copy2(intermediate, final_candidate)
+                success += 1
+            except OSError as exc:
+                logger.warning(
+                    "Не удалось скопировать результат %s: %s", intermediate, exc
+                )
+
+        await msg.edit_text(
+            f"Обработка [{i}/{len_paths}] (На проверке={'ON' if review_on else 'OFF'})"
+        )
+
+    if clean_dir.exists():
+        shutil.rmtree(clean_dir, ignore_errors=True)
 
     await _send_results(message, str(output_dir))
     clear_dirs_bought_out(user_id)
 
     await message.answer(
         f"Готово: {success}/{len_paths} файлов обработаны.",
-        reply_markup=await _processing_keyboard(),
+        reply_markup=await _processing_keyboard(state),
     )
 
 
@@ -225,5 +299,5 @@ async def vu_end_cmd(
 ) -> None:
     await message.answer(
         "Пришлите PNG/JPG как документ или используйте кнопки ниже.",
-        reply_markup=await _processing_keyboard(),
+        reply_markup=await _processing_keyboard(state),
     )

@@ -16,3 +16,8 @@ format:
 
 	echo "Running isort..."
 	uv run isort --settings-file pyproject.toml $(app-dir)
+
+
+.PHONY: tuner
+tuner:
+	uv run bot/utils/on_review_tuner.py test.jpg
