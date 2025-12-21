@@ -43,6 +43,10 @@ FILES_PREVIEW_LIMIT: Final[int] = 20
 REVIEW_LABEL: Final[str] = "На проверке"
 REVIEW_SELECTED_PREFIX: Final[str] = "✅ "
 STATE_KEY_REVIEW: Final[str] = "bo_use_review"
+STATE_KEY_REVIEW_VERSION: Final[str] = "bo_review_version"
+REVIEW_VERSIONS: Final[list[str]] = ["v1", "v2"]
+REVIEW_VERSION_LABELS: Final[dict[str, str]] = {"v1": "V1", "v2": "V2"}
+DEFAULT_REVIEW_VERSION: Final[str] = "v2"
 
 
 async def _review_enabled(state: FSMContext) -> bool:
@@ -50,10 +54,21 @@ async def _review_enabled(state: FSMContext) -> bool:
     return bool(data.get(STATE_KEY_REVIEW, False))
 
 
+async def _current_review_version(state: FSMContext) -> str:
+    data = await state.get_data()
+    version = data.get(STATE_KEY_REVIEW_VERSION, DEFAULT_REVIEW_VERSION)
+    if version not in REVIEW_VERSIONS:
+        return DEFAULT_REVIEW_VERSION
+    return version
+
+
 async def _processing_keyboard(state: FSMContext):
     review_on = await _review_enabled(state)
+    review_version = await _current_review_version(state)
     label = f"{REVIEW_SELECTED_PREFIX}{REVIEW_LABEL}" if review_on else REVIEW_LABEL
-    return await rk_processing([label])
+    version = await _current_review_version(state)
+    version_label = REVIEW_VERSION_LABELS.get(version, REVIEW_VERSION_LABELS[DEFAULT_REVIEW_VERSION])
+    return await rk_processing([label, version_label])
 
 
 def _user_id(user: UserManager, message: Message) -> int:
@@ -110,10 +125,16 @@ async def _start_bought_out(
 ) -> None:
     await fn.state_clear(state)
     await state.set_state(UserState.send_files_bo)
-    await state.update_data({STATE_KEY_REVIEW: False})
+    await state.update_data(
+        {
+            STATE_KEY_REVIEW: False,
+            STATE_KEY_REVIEW_VERSION: DEFAULT_REVIEW_VERSION,
+        }
+    )
     intro = (
         "Загрузите PNG/JPG с плашкой «ОТКАЗАЛИСЬ» как документ, затем жмите «🚀 Старт».\n"
-        "⚙️ Кнопка «На проверке» — включить/выключить удаление этой плашки.\n"
+        "⚙️ «На проверке» — включить/выключить удаление плашки.\n"
+        "🎛 V1/V2 — версия алгоритма (v2: цветовая маска и защита слева, v1: оригинал).\n"
         "📂 «Файлы» — очередь, 🧹 «Очистить» — удалить загруженное."
     )
     await message.answer(intro, reply_markup=await _processing_keyboard(state))
@@ -217,7 +238,35 @@ async def toggle_review(
     )
 
 
-@router.message(UserState.send_files_bo, F.text == BTN_START)
+@router.message(
+    UserState.send_files_bo,
+    F.text.func(
+        lambda text: (text or "").strip().replace(REVIEW_SELECTED_PREFIX, "")
+        in REVIEW_VERSION_LABELS.values()
+    ),
+)
+async def switch_review_version(
+    message: Message,
+    user: UserManager,
+    state: FSMContext,
+    redis: Redis | None = None,
+) -> None:
+    current = await _current_review_version(state)
+    try:
+        idx = REVIEW_VERSIONS.index(current)
+    except ValueError:
+        idx = 0
+    next_version = REVIEW_VERSIONS[(idx + 1) % len(REVIEW_VERSIONS)]
+    await state.update_data({STATE_KEY_REVIEW_VERSION: next_version})
+    await message.answer(
+        f"Версия алгоритма: {REVIEW_VERSION_LABELS[next_version]}",
+        reply_markup=await _processing_keyboard(state),
+    )
+
+
+@router.message(
+    UserState.send_files_bo, F.text == BTN_START
+)
 async def vu_start_cmd(
     message: Message,
     user: UserManager,
@@ -237,13 +286,15 @@ async def vu_start_cmd(
 
     resized_vykupili, new_h, new_w = init_source_bought_out()
     review_on = await _review_enabled(state)
+    review_version = await _current_review_version(state)
     clean_dir = output_dir / "_tmp_on_review"
     if clean_dir.exists():
         shutil.rmtree(clean_dir, ignore_errors=True)
     clean_dir.mkdir(parents=True, exist_ok=True)
 
+    version_tag = review_version.upper() if review_on else ""
     msg = await message.answer(
-        f"Обработка [0/{len_paths}] (На проверке={'ON' if review_on else 'OFF'})"
+        f"Обработка [0/{len_paths}] (На проверке={'ON' if review_on else 'OFF'} {version_tag})"
     )
     success = 0
     for i, p in enumerate(paths, start=1):
@@ -253,7 +304,9 @@ async def vu_start_cmd(
             intermediate = Path(p)
 
         if review_on:
-            removed = remove_on_review_badge(str(intermediate), output_dir)
+            removed = remove_on_review_badge(
+                str(intermediate), output_dir, version=review_version
+            )
             final_candidate = output_dir / Path(intermediate).name.lower()
             if not final_candidate.exists() and intermediate.exists():
                 try:
@@ -275,7 +328,7 @@ async def vu_start_cmd(
                 )
 
         await msg.edit_text(
-            f"Обработка [{i}/{len_paths}] (На проверке={'ON' if review_on else 'OFF'})"
+            f"Обработка [{i}/{len_paths}] (На проверке={'ON' if review_on else 'OFF'} {version_tag})"
         )
 
     if clean_dir.exists():

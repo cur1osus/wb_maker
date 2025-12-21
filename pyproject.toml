@@ -8,9 +8,14 @@ dependencies = [
     "aiogram>=3.23.0",
     "aiomysql>=0.3.2",
     "msgspec>=0.20.0",
-    "opencv-python>=4.12.0.88",
+    "opencv-python-headless>=4.12.0.88",
     "pytesseract>=0.3.13",
     "python-dotenv>=1.2.1",
     "redis>=7.1.0",
     "sqlalchemy>=2.0.45",
+]
+
+[project.optional-dependencies]
+tuner = [
+    "pyqt5>=5.15.11",
 ]

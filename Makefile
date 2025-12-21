@@ -20,4 +20,8 @@ format:
 
 .PHONY: tuner
 tuner:
-	uv run bot/utils/on_review_tuner.py test.jpg
+	uv run bot/utils/on_review_tuner.py test2.jpg
+
+.PHONY: tuner-gui
+tuner-gui:
+	uv run --extra tuner bot/utils/on_review_tuner.py test2.jpg
