@@ -16,7 +16,7 @@ class Function:
     ) -> None:
         await Function.state_clear(state)
         await message.answer(
-            text="Главное меню. Выберите режим обработки.",
+            text="Главное меню: выберите режим обработки.",
             reply_markup=await rk_main_menu(),
         )
 

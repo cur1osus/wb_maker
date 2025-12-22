@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Final
+from typing import TYPE_CHECKING, Final
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -15,21 +15,19 @@ from bot.keyboards.reply import (
     BTN_CANCEL,
     BTN_CLEAR,
     BTN_FILES,
-    BTN_MAIN_DELIVERED,
+    BTN_MAIN_STITCH,
     BTN_START,
     rk_processing,
 )
 from bot.states import UserState
 from bot.utils import fn
-from bot.utils.process_delivered import (
-    clear_dirs_d,
+from bot.utils.process_stitching import (
+    clear_dirs_stitch,
     ensure_user_dirs,
     get_paths,
-    process_image_d_v1,
-    process_image_d_v2,
-    process_image_d_vertical,
+    pairs_from_queue,
+    stitch_pair,
 )
-from bot.utils.on_review import remove_on_review_badge
 
 if TYPE_CHECKING:
     from aiogram.types import Message
@@ -39,49 +37,7 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS: Final[set[str]] = {".png", ".jpg", ".jpeg"}
-DEFAULT_DO_MODE: Final[str] = "w"
-DO_MODE_ORDER: Final[list[str]] = ["w", "b", "v"]
-DO_MODE_BASE_LABELS: Final[dict[str, str]] = {
-    "w": "W",
-    "b": "B",
-    "v": "V",
-}
-DO_MODE_LABELS: Final[dict[str, str]] = {
-    "w": "⚪ W",
-    "b": "⬛ B",
-    "v": "↕️ V",
-}
-DO_MODE_FUNCS: Final[dict[str, Callable[[str, Path], bool]]] = {
-    "w": process_image_d_v1,
-    "b": process_image_d_v2,
-    "v": process_image_d_vertical,
-}
-
 FILES_PREVIEW_LIMIT: Final[int] = 20
-MODE_SELECTED_PREFIX: Final[str] = "✅ "
-
-
-def _mode_button_label(mode: str) -> str:
-    label = DO_MODE_LABELS.get(mode, DO_MODE_LABELS[DEFAULT_DO_MODE])
-    return label
-
-
-def _mode_buttons(mode: str) -> list[str]:
-    return [
-        f"{MODE_SELECTED_PREFIX}{_mode_button_label(opt)}"
-        if opt == mode
-        else _mode_button_label(opt)
-        for opt in DO_MODE_ORDER
-    ]
-
-
-def _mode_from_text(text: str) -> str | None:
-    cleaned = (text or "").replace(MODE_SELECTED_PREFIX, "").strip()
-    for key, label in DO_MODE_LABELS.items():
-        base = DO_MODE_BASE_LABELS[key]
-        if cleaned == label or cleaned.endswith(base):
-            return key
-    return None
 
 
 def _user_id(user: UserManager, message: Message) -> int:
@@ -90,26 +46,17 @@ def _user_id(user: UserManager, message: Message) -> int:
     )
 
 
-async def _current_mode(state: FSMContext) -> str:
-    data = await state.get_data()
-    return data.get("do_mode", DEFAULT_DO_MODE)
-
-
-async def _processing_keyboard(state: FSMContext):
-    mode = await _current_mode(state)
-    return await rk_processing(_mode_buttons(mode))
-
-
 def _render_queue(paths: list[str]) -> str:
     if not paths:
-        return "Очередь пуста. Пришли PNG как документ."
+        return "Очередь пуста. Пришли 2 файла (верх и низ) как документы."
 
     preview = [Path(p).name for p in paths[:FILES_PREVIEW_LIMIT]]
     body = "\n".join(f"{i + 1}. {name}" for i, name in enumerate(preview))
     tail = ""
     if len(paths) > len(preview):
         tail = f"\n... и еще {len(paths) - len(preview)} файл(ов)"
-    return f"В очереди {len(paths)} файл(ов):\n{body}{tail}"
+    warning = "\n⚠️ Нужное количество файлов — четное." if len(paths) % 2 else ""
+    return f"В очереди {len(paths)} файл(ов):\n{body}{tail}{warning}"
 
 
 async def _send_results(message: Message, folder: str) -> None:
@@ -142,38 +89,34 @@ async def _send_results(message: Message, folder: str) -> None:
         )
 
 
-async def _start_delivered(
+async def _start_stitching(
     message: Message,
     state: FSMContext,
 ) -> None:
     await fn.state_clear(state)
-    await state.set_state(UserState.send_files_do)
-    await state.update_data(do_mode=DEFAULT_DO_MODE)
-
+    await state.set_state(UserState.send_files_stitch)
     intro = (
         "Что делать:\n"
-        "1) Пришлите PNG/JPG как документ.\n"
+        "1) Пришлите два файла: верх, затем низ (как документы).\n"
         "2) Нажмите «🚀 Старт».\n"
-        "Режимы:\n"
-        "• ⚪ W — белый фон.\n"
-        "• ⬛ B — черный фон.\n"
-        "• ↕️ V — две строки.\n"
-        "Сервис: 📂 Файлы — очередь, 🧹 Очистить — убрать загруженное."
+        "Очередь: можно загрузить несколько пар подряд, порядок сохраняется.\n"
+        "Подписи «верх»/«низ» в названии помогают угадать порядок.\n"
+        "Сервис: 📂 Файлы — очередь, 🧹 Очистить — удалить загруженное."
     )
-    await message.answer(intro, reply_markup=await _processing_keyboard(state))
+    await message.answer(intro, reply_markup=await rk_processing())
 
 
-@router.message(F.text == BTN_MAIN_DELIVERED)
-async def delivered_entry(
+@router.message(F.text == BTN_MAIN_STITCH)
+async def stitch_entry(
     message: Message,
     user: UserManager,
     state: FSMContext,
     redis: Redis | None = None,
 ) -> None:
-    await _start_delivered(message, state)
+    await _start_stitching(message, state)
 
 
-@router.message(UserState.send_files_do, F.text == BTN_CANCEL)
+@router.message(UserState.send_files_stitch, F.text == BTN_CANCEL)
 async def cancel(
     message: Message,
     user: UserManager,
@@ -185,8 +128,8 @@ async def cancel(
     await fn.show_main_menu(message, state)
 
 
-@router.message(UserState.send_files_do, F.document)
-async def send_files_do(
+@router.message(UserState.send_files_stitch, F.document)
+async def receive_file(
     message: Message,
     user: UserManager,
     state: FSMContext,
@@ -209,13 +152,14 @@ async def send_files_do(
         target,
     )
     paths = get_paths(user_id)
+    postfix = " Добавьте еще один, чтобы собрать пару." if len(paths) % 2 else ""
     await message.answer(
-        f"Файл {target.name} сохранен. В очереди {len(paths)}.",
-        reply_markup=await _processing_keyboard(state),
+        f"Файл {target.name} сохранен. В очереди {len(paths)}.{postfix}",
+        reply_markup=await rk_processing(),
     )
 
 
-@router.message(UserState.send_files_do, F.text == BTN_FILES)
+@router.message(UserState.send_files_stitch, F.text == BTN_FILES)
 async def show_queue(
     message: Message,
     user: UserManager,
@@ -223,42 +167,24 @@ async def show_queue(
     redis: Redis | None = None,
 ) -> None:
     text = _render_queue(get_paths(_user_id(user, message)))
-    await message.answer(text, reply_markup=await _processing_keyboard(state))
+    await message.answer(text, reply_markup=await rk_processing())
 
 
-@router.message(UserState.send_files_do, F.text == BTN_CLEAR)
+@router.message(UserState.send_files_stitch, F.text == BTN_CLEAR)
 async def clear_queue(
     message: Message,
     user: UserManager,
     state: FSMContext,
     redis: Redis | None = None,
 ) -> None:
-    clear_dirs_d(_user_id(user, message))
+    clear_dirs_stitch(_user_id(user, message))
     await message.answer(
-        "Очередь и результаты очищены.", reply_markup=await _processing_keyboard(state)
+        "Очередь и результаты очищены.", reply_markup=await rk_processing()
     )
 
 
-@router.message(
-    UserState.send_files_do,
-    F.text.func(lambda text: bool(text) and _mode_from_text(text) is not None),
-)
-async def switch_mode(
-    message: Message,
-    user: UserManager,
-    state: FSMContext,
-    redis: Redis | None = None,
-) -> None:
-    mode = _mode_from_text(message.text or "") or DEFAULT_DO_MODE
-    await state.update_data(do_mode=mode)
-    await message.answer(
-        f"Режим переключен на {_mode_button_label(mode)}.",
-        reply_markup=await _processing_keyboard(state),
-    )
-
-
-@router.message(UserState.send_files_do, F.text == BTN_START)
-async def do_start(
+@router.message(UserState.send_files_stitch, F.text == BTN_START)
+async def start_stitching(
     message: Message,
     user: UserManager,
     state: FSMContext,
@@ -267,34 +193,46 @@ async def do_start(
     user_id = _user_id(user, message)
     input_dir, output_dir = ensure_user_dirs(user_id)
     paths = get_paths(user_id)
-    len_paths = len(paths)
-    if not len_paths:
+
+    if len(paths) < 2:
         await message.answer(
-            "Очередь пуста. Пришлите PNG/JPG как документ.",
-            reply_markup=await _processing_keyboard(state),
+            "Нужно минимум два файла: верх и низ.",
+            reply_markup=await rk_processing(),
+        )
+        return
+    if len(paths) % 2 != 0:
+        await message.answer(
+            "Количество файлов должно быть четным. Добавьте или уберите один файл.",
+            reply_markup=await rk_processing(),
         )
         return
 
-    mode = await _current_mode(state)
-    func = DO_MODE_FUNCS.get(mode, process_image_d_v1)
+    pairs = pairs_from_queue(paths)
+    if not pairs:
+        await message.answer(
+            "Не нашел пар для сращивания. Пришлите файлы заново.",
+            reply_markup=await rk_processing(),
+        )
+        return
 
-    msg = await message.answer(f"Обработка [0/{len_paths}]")
+    msg = await message.answer(f"Обработка [0/{len(pairs)}]")
     success = 0
-    for i, p in enumerate(paths, start=1):
-        if func(p, output_dir):
+    for idx, (top_path, bottom_path) in enumerate(pairs, start=1):
+        result = stitch_pair(top_path, bottom_path, output_dir)
+        if result:
             success += 1
-        await msg.edit_text(f"Обработка [{i}/{len_paths}]")
+        await msg.edit_text(f"Обработка [{idx}/{len(pairs)}]")
 
     await _send_results(message, str(output_dir))
-    clear_dirs_d(user_id)
+    clear_dirs_stitch(user_id)
 
     await message.answer(
-        f"Готово: {success}/{len_paths} файлов обработаны.",
-        reply_markup=await _processing_keyboard(state),
+        f"Готово: {success}/{len(pairs)} файл(ов) срощено.",
+        reply_markup=await rk_processing(),
     )
 
 
-@router.message(UserState.send_files_do)
+@router.message(UserState.send_files_stitch)
 async def fallback(
     message: Message,
     user: UserManager,
@@ -303,5 +241,5 @@ async def fallback(
 ) -> None:
     await message.answer(
         "Пришлите PNG/JPG как документ или используйте кнопки ниже.",
-        reply_markup=await _processing_keyboard(state),
+        reply_markup=await rk_processing(),
     )

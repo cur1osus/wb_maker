@@ -40,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS: Final[set[str]] = {".png", ".jpg", ".jpeg"}
 FILES_PREVIEW_LIMIT: Final[int] = 20
-REVIEW_LABEL: Final[str] = "На проверке"
+REVIEW_LABEL: Final[str] = "🔴 На проверке"
 REVIEW_SELECTED_PREFIX: Final[str] = "✅ "
 STATE_KEY_REVIEW: Final[str] = "bo_use_review"
 STATE_KEY_REVIEW_VERSION: Final[str] = "bo_review_version"
 REVIEW_VERSIONS: Final[list[str]] = ["v1", "v2"]
-REVIEW_VERSION_LABELS: Final[dict[str, str]] = {"v1": "V1", "v2": "V2"}
+REVIEW_VERSION_LABELS: Final[dict[str, str]] = {"v1": "⚙️ V1", "v2": "⚙️ V2"}
 DEFAULT_REVIEW_VERSION: Final[str] = "v2"
 
 
@@ -67,7 +67,9 @@ async def _processing_keyboard(state: FSMContext):
     review_version = await _current_review_version(state)
     label = f"{REVIEW_SELECTED_PREFIX}{REVIEW_LABEL}" if review_on else REVIEW_LABEL
     version = await _current_review_version(state)
-    version_label = REVIEW_VERSION_LABELS.get(version, REVIEW_VERSION_LABELS[DEFAULT_REVIEW_VERSION])
+    version_label = REVIEW_VERSION_LABELS.get(
+        version, REVIEW_VERSION_LABELS[DEFAULT_REVIEW_VERSION]
+    )
     return await rk_processing([label, version_label])
 
 
@@ -132,10 +134,15 @@ async def _start_bought_out(
         }
     )
     intro = (
-        "Загрузите PNG/JPG с плашкой «ОТКАЗАЛИСЬ» как документ, затем жмите «🚀 Старт».\n"
-        "⚙️ «На проверке» — включить/выключить удаление плашки.\n"
-        "🎛 V1/V2 — версия алгоритма (v2: цветовая маска и защита слева, v1: оригинал).\n"
-        "📂 «Файлы» — очередь, 🧹 «Очистить» — удалить загруженное."
+        "Что делать:\n"
+        "1) Пришлите PNG/JPG с плашкой «ОТКАЗАЛИСЬ» как документ.\n"
+        "2) Нажмите «🚀 Старт».\n"
+        "Переключатели:\n"
+        "• 🟠 На проверке — удалять плашку.\n"
+        "• ⚙️ V1/V2 — версия алгоритма (V2: маска и защита слева, V1: базовая).\n"
+        "Сервис:\n"
+        "• 📂 Файлы — показать очередь.\n"
+        "• 🧹 Очистить — удалить загруженное."
     )
     await message.answer(intro, reply_markup=await _processing_keyboard(state))
 
@@ -233,7 +240,7 @@ async def toggle_review(
     await state.update_data({STATE_KEY_REVIEW: not current})
     status = "включен" if not current else "выключен"
     await message.answer(
-        f"Режим «На проверке» {status}.",
+        f"🟠 На проверке {status}.",
         reply_markup=await _processing_keyboard(state),
     )
 
@@ -258,15 +265,14 @@ async def switch_review_version(
         idx = 0
     next_version = REVIEW_VERSIONS[(idx + 1) % len(REVIEW_VERSIONS)]
     await state.update_data({STATE_KEY_REVIEW_VERSION: next_version})
+    next_label = REVIEW_VERSION_LABELS[next_version]
     await message.answer(
-        f"Версия алгоритма: {REVIEW_VERSION_LABELS[next_version]}",
+        f"Версия алгоритма: {next_label}",
         reply_markup=await _processing_keyboard(state),
     )
 
 
-@router.message(
-    UserState.send_files_bo, F.text == BTN_START
-)
+@router.message(UserState.send_files_bo, F.text == BTN_START)
 async def vu_start_cmd(
     message: Message,
     user: UserManager,
@@ -294,7 +300,7 @@ async def vu_start_cmd(
 
     version_tag = review_version.upper() if review_on else ""
     msg = await message.answer(
-        f"Обработка [0/{len_paths}] (На проверке={'ON' if review_on else 'OFF'} {version_tag})"
+        f"Обработка [0/{len_paths}] • 🟠={'ON' if review_on else 'OFF'} {version_tag}"
     )
     success = 0
     for i, p in enumerate(paths, start=1):
@@ -328,7 +334,7 @@ async def vu_start_cmd(
                 )
 
         await msg.edit_text(
-            f"Обработка [{i}/{len_paths}] (На проверке={'ON' if review_on else 'OFF'} {version_tag})"
+            f"Обработка [{i}/{len_paths}] • 🟠={'ON' if review_on else 'OFF'} {version_tag}"
         )
 
     if clean_dir.exists():

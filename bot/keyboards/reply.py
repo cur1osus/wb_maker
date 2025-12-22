@@ -5,9 +5,10 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 logger = logging.getLogger(__name__)
 
-BTN_CANCEL: Final[str] = "Отмена"
-BTN_MAIN_BOUGHT_OUT: Final[str] = "Выкуплен"
-BTN_MAIN_DELIVERED: Final[str] = "Доставлен"
+BTN_CANCEL: Final[str] = "✖️ Отмена"
+BTN_MAIN_BOUGHT_OUT: Final[str] = "🛒 Выкуплен"
+BTN_MAIN_DELIVERED: Final[str] = "📦 Доставлен"
+BTN_MAIN_STITCH: Final[str] = "🪡 Сращивание"
 BTN_START: Final[str] = "🚀 Старт"
 BTN_FILES: Final[str] = "📂 Файлы"
 BTN_CLEAR: Final[str] = "🧹 Очистить"
@@ -24,6 +25,7 @@ async def rk_main_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text=BTN_MAIN_BOUGHT_OUT)
     builder.button(text=BTN_MAIN_DELIVERED)
+    builder.button(text=BTN_MAIN_STITCH)
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
