@@ -521,9 +521,6 @@ class TunerWindow(QtWidgets.QWidget):
         if bbox:
             status = f"FOUND @ {bbox}"
             preview, roi_rect = _strip_badge(preview, bbox, self.params)
-            if roi_rect:
-                x1, y1, x2, y2 = roi_rect
-                cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 180, 255), 2)
         else:
             status = "NOT FOUND"
 
@@ -559,9 +556,6 @@ class TunerWindow(QtWidgets.QWidget):
         preview = self.img_bgr.copy()
         if bbox:
             preview, roi_rect = _strip_badge(preview, bbox, self.params)
-            if roi_rect:
-                x1, y1, x2, y2 = roi_rect
-                cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 180, 255), 2)
         rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
         cv2.imwrite(str(target), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
         self.status_label.setText(f"Saved → {target.name}")

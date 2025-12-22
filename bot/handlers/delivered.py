@@ -40,18 +40,16 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS: Final[set[str]] = {".png", ".jpg", ".jpeg"}
 DEFAULT_DO_MODE: Final[str] = "w"
-DO_MODE_ORDER: Final[list[str]] = ["w", "b", "v", "r"]
+DO_MODE_ORDER: Final[list[str]] = ["w", "b", "v"]
 DO_MODE_LABELS: Final[dict[str, str]] = {
     "w": "W",
     "b": "B",
     "v": "V",
-    "r": "R",
 }
 DO_MODE_FUNCS: Final[dict[str, Callable[[str, Path], bool]]] = {
     "w": process_image_d_v1,
     "b": process_image_d_v2,
     "v": process_image_d_vertical,
-    "r": remove_on_review_badge,
 }
 
 FILES_PREVIEW_LIMIT: Final[int] = 20
@@ -148,7 +146,7 @@ async def _start_delivered(
 
     intro = (
         "Загрузите PNG/JPG как документ, затем жмите «🚀 Старт».\n"
-        "⚙️ Режимы: W — белый, B — черный, V — две строки, R — убрать «НА ПРОВЕРКЕ».\n"
+        "⚙️ Режимы: W — белый, B — черный, V — две строки.\n"
         "📂 «Файлы» — покажу очередь\n🧹 «Очистить» — удалю все загруженное."
     )
     await message.answer(intro, reply_markup=await _processing_keyboard(state))
