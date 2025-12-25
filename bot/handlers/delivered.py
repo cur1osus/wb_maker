@@ -28,6 +28,7 @@ from bot.utils.process_delivered import (
     process_image_d_v1,
     process_image_d_v2,
     process_image_d_vertical,
+    process_image_d_small_phone,
 )
 from bot.utils.on_review import remove_on_review_badge
 
@@ -40,21 +41,24 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS: Final[set[str]] = {".png", ".jpg", ".jpeg"}
 DEFAULT_DO_MODE: Final[str] = "w"
-DO_MODE_ORDER: Final[list[str]] = ["w", "b", "v"]
+DO_MODE_ORDER: Final[list[str]] = ["w", "b", "v", "s"]
 DO_MODE_BASE_LABELS: Final[dict[str, str]] = {
     "w": "W",
     "b": "B",
     "v": "V",
+    "s": "S",
 }
 DO_MODE_LABELS: Final[dict[str, str]] = {
     "w": "⚪ W",
     "b": "⬛ B",
     "v": "↕️ V",
+    "s": "📱 S",
 }
 DO_MODE_FUNCS: Final[dict[str, Callable[[str, Path], bool]]] = {
     "w": process_image_d_v1,
     "b": process_image_d_v2,
     "v": process_image_d_vertical,
+    "s": process_image_d_small_phone,
 }
 
 FILES_PREVIEW_LIMIT: Final[int] = 20
@@ -158,6 +162,7 @@ async def _start_delivered(
         "• ⚪ W — белый фон.\n"
         "• ⬛ B — черный фон.\n"
         "• ↕️ V — две строки.\n"
+        "• 📱 S — скрины маленького телефона.\n"
         "Сервис: 📂 Файлы — очередь, 🧹 Очистить — убрать загруженное."
     )
     await message.answer(intro, reply_markup=await _processing_keyboard(state))

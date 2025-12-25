@@ -6,10 +6,12 @@ import os
 import re
 import shutil
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
 import cv2
+import numpy as np
 import pytesseract
 from PIL import Image, ImageDraw, ImageFont
 
@@ -29,6 +31,7 @@ PSM_MODES: Final[list[int]] = [6, 7, 8, 13]
 
 SCALE_V2: Final[float] = 3.0
 SCALE_V1: Final[float] = 3.0
+SCALE_SMALL_PHONE: Final[float] = 3.6
 
 DATE_DDMMYYYY_RE: Final[re.Pattern[str]] = re.compile(
     r"(?<!\d)(\d{2})(\d{2})(\d{4})(?!\d)"
@@ -83,6 +86,19 @@ def _load_font() -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 FONT = _load_font()
+
+
+@lru_cache(maxsize=16)
+def _font_with_size(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_path = _resolve_asset("hr.ttf")
+    if px <= 0:
+        return FONT
+
+    try:
+        return ImageFont.truetype(str(font_path), px)
+    except OSError as exc:
+        logger.warning("Не удалось загрузить шрифт %s: %s", font_path, exc)
+        return FONT
 
 
 def _configure_tesseract() -> None:
@@ -372,6 +388,118 @@ def process_image_d_vertical(input_path: str, output_dir: Path) -> bool:
             draw.text((max(0, x - 5), y), new_text, fill=(0, 179, 89), font=FONT)
             found_any = True
 
+        if found_any:
+            break
+
+    output_path = output_dir / Path(input_path).name.lower()
+    pil_img.save(output_path, format="PNG")
+    return found_any
+
+
+def process_image_d_small_phone(input_path: str, output_dir: Path) -> bool:
+    """Обработка для узких/низких скринов (например, 750×1334)."""
+
+    img = cv2.imread(input_path)
+    if img is None:
+        logger.error("Не удалось загрузить изображение: %s", input_path)
+        return False
+
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l_channel)
+    enhanced = cv2.cvtColor(cv2.merge((cl, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(
+        gray,
+        None,
+        fx=SCALE_SMALL_PHONE,
+        fy=SCALE_SMALL_PHONE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+    versions: list[tuple[str, "cv2.typing.MatLike"]] = []
+    _, thresh_inv = cv2.threshold(resized, 70, 255, cv2.THRESH_BINARY_INV)
+    versions.append(("dark", thresh_inv))
+    _, thresh = cv2.threshold(resized, 180, 255, cv2.THRESH_BINARY)
+    versions.append(("light", thresh))
+
+    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+
+    found_any = False
+    for _version_name, processed in versions:
+        for psm in PSM_MODES:
+            custom_config = (
+                f"--oem 3 --psm {psm} "
+                "-c tessedit_char_whitelist="
+                "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+                "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+                "0123456789 .:/"
+            )
+
+            try:
+                ocr_data = pytesseract.image_to_data(
+                    Image.fromarray(processed),
+                    config=custom_config,
+                    lang="rus",
+                    output_type=pytesseract.Output.DICT,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Ошибка OCR: %s", exc)
+                _copy_to_output(input_path, output_dir)
+                return False
+
+            for i, raw_text in enumerate(ocr_data.get("text", [])):
+                text = (raw_text or "").strip()
+                if not text:
+                    continue
+
+                if not RETURNED_WORD_RE.search(text):
+                    continue
+
+                x = int(ocr_data["left"][i] / SCALE_SMALL_PHONE)
+                y = int(ocr_data["top"][i] / SCALE_SMALL_PHONE)
+                w = int(ocr_data["width"][i] / SCALE_SMALL_PHONE)
+                h = int(ocr_data["height"][i] / SCALE_SMALL_PHONE)
+
+                padding_horiz = 10
+                padding_vert_top = 4
+                padding_vert_bot = 12
+
+                x1 = max(0, x - padding_horiz)
+                y1 = max(0, y - padding_vert_top)
+                x2 = min(pil_img.width, x + w + padding_horiz)
+                y2 = min(pil_img.height, y + h + padding_vert_bot)
+
+                roi = img[
+                    max(0, y1 - 2) : min(img.shape[0], y2 + 2),
+                    max(0, x1 - 2) : min(img.shape[1], x2 + 2),
+                ]
+                fill_color = (24, 24, 27)
+                if roi.size:
+                    med = np.median(roi.reshape(-1, 3), axis=0)
+                    fill_color = (int(med[2]), int(med[1]), int(med[0]))
+
+                font_size = max(30, min(54, int(h * 1.05)))
+                font = _font_with_size(font_size)
+
+                draw.rectangle((x1, y1, x2, y2), fill=fill_color)
+
+                normalized = _normalize_date(text)
+                new_text = RETURNED_WORD_RE.sub("Доставлен ", normalized)
+
+                draw.text(
+                    (max(0, x - 6), max(0, y - int(h * 0.1))),
+                    new_text,
+                    fill=(0, 179, 89),
+                    font=font,
+                )
+                found_any = True
+
+            if found_any:
+                break
         if found_any:
             break
 
