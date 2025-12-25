@@ -16,6 +16,16 @@ INPUT_ROOT: Final[Path] = Path("images_v")
 OUTPUT_ROOT: Final[Path] = Path("result_images_v")
 SUPPORTED_EXTENSIONS: Final[set[str]] = {".png", ".jpg", ".jpeg"}
 TEMPLATE_THRESHOLD: Final[float] = 0.8
+SMALL_TEMPLATE_SCALES: Final[tuple[float, ...]] = (
+    0.55,
+    0.65,
+    0.75,
+    0.85,
+    0.95,
+    1.05,
+)
+SMALL_TEMPLATE_THRESHOLD: Final[float] = 0.75
+SMALL_OVERLAY_BOOST: Final[float] = 1.05
 
 # Backward-compatible aliases (some code may rely on these names).
 input_folder: Final[str] = str(INPUT_ROOT)
@@ -127,6 +137,98 @@ def init_source_bought_out(scale: float = 1.1) -> tuple[np.ndarray, int, int]:
         )
 
     return resized_vykupili, new_h, new_w
+
+
+def _resize_with_scale(img: np.ndarray, scale: float) -> np.ndarray:
+    if img.size == 0:
+        return img
+
+    h_orig, w_orig = img.shape[:2]
+    new_w = max(1, int(w_orig * scale))
+    new_h = max(1, int(h_orig * scale))
+    interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+    return cv2.resize(img, (new_w, new_h), interpolation=interp)
+
+
+def process_image_v_small_phone(
+    img_path: str,
+    output_dir: Path,
+    y_offset: int = -3,
+) -> bool:
+    """Обрабатывает скрины с маленьких экранов (например, 750×1334)."""
+
+    assets = _load_assets()
+    if assets is None:
+        _copy_to_output(img_path, output_dir)
+        return False
+
+    img = cv2.imread(img_path)
+    if img is None:
+        logger.info("Не удалось загрузить: %s", img_path)
+        return False
+
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    best_match: tuple[float, float, np.ndarray, np.ndarray] | None = None
+
+    for scale in SMALL_TEMPLATE_SCALES:
+        scaled_template = _resize_with_scale(assets.otkazalis_template, scale)
+        template_h, template_w = scaled_template.shape[:2]
+        if img_gray.shape[0] < template_h or img_gray.shape[1] < template_w:
+            continue
+
+        res = cv2.matchTemplate(img_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+
+        if max_val >= SMALL_TEMPLATE_THRESHOLD and (
+            best_match is None or max_val > best_match[0]
+        ):
+            best_match = (max_val, scale, scaled_template, res)
+
+    if best_match is None:
+        _copy_to_output(img_path, output_dir)
+        return False
+
+    _, scale, best_template, best_res = best_match
+    template_h, template_w = best_template.shape[:2]
+
+    overlay_scale = scale * SMALL_OVERLAY_BOOST
+    resized_overlay = _resize_with_scale(assets.vykupili, overlay_scale)
+    overlay_h, overlay_w = resized_overlay.shape[:2]
+
+    loc = np.where(best_res >= SMALL_TEMPLATE_THRESHOLD)
+
+    processed = False
+    used_points: list[tuple[int, int]] = []
+    for x, y in zip(*loc[::-1]):
+        if any(abs(x - px) <= 3 and abs(y - py) <= 3 for px, py in used_points):
+            continue
+
+        used_points.append((x, y))
+
+        vx1 = x
+        vx2 = x + overlay_w
+
+        vy_center = y + (template_h - overlay_h) // 2
+        vy1 = vy_center + y_offset
+        vy2 = vy1 + overlay_h
+
+        if vx2 > img.shape[1] or vy2 > img.shape[0] or vx1 < 0 or vy1 < 0:
+            logger.info("Не удалось вставить плашку (границы): %s", img_path)
+            continue
+
+        cv2.rectangle(
+            img,
+            (x, y),
+            (x + template_w, y + template_h),
+            (255, 255, 255),
+            -1,
+        )
+
+        img[vy1:vy2, vx1:vx2] = resized_overlay
+        processed = True
+
+    cv2.imwrite(str(output_dir / Path(img_path).name), img)
+    return processed
 
 
 def process_image_v(
