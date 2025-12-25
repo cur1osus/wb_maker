@@ -47,7 +47,7 @@ STATE_KEY_REVIEW: Final[str] = "bo_use_review"
 STATE_KEY_REVIEW_VERSION: Final[str] = "bo_review_version"
 REVIEW_VERSIONS: Final[list[str]] = ["v1", "v2"]
 REVIEW_VERSION_LABELS: Final[dict[str, str]] = {"v1": "⚙️ V1", "v2": "⚙️ V2"}
-DEFAULT_REVIEW_VERSION: Final[str] = "v2"
+DEFAULT_REVIEW_VERSION: Final[str] = "v1"
 SMALL_PHONE_LABEL: Final[str] = "Маленький телефон"
 STATE_KEY_SMALL_PHONE: Final[str] = "bo_small_phone"
 
