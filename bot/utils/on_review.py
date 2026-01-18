@@ -8,6 +8,9 @@ from typing import Final
 
 import cv2
 import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +358,9 @@ def _remove_on_review_badge_v2(
 
     roi_width = max(
         int(w * ON_REVIEW_ROI_WIDTH_MULTIPLIER),
-        w + ON_REVIEW_ROI_EXTRA_WIDTH,
+        img.shape[1] - x1
+        if ON_REVIEW_ROI_EXTRA_WIDTH < 0
+        else w + ON_REVIEW_ROI_EXTRA_WIDTH,
     )
     x2 = min(img.shape[1], x1 + roi_width)
     y1 = max(0, y - padding_top)
