@@ -44,10 +44,6 @@ FILES_PREVIEW_LIMIT: Final[int] = 20
 REVIEW_LABEL: Final[str] = "🔴 На проверке"
 REVIEW_SELECTED_PREFIX: Final[str] = "✅ "
 STATE_KEY_REVIEW: Final[str] = "bo_use_review"
-STATE_KEY_REVIEW_VERSION: Final[str] = "bo_review_version"
-REVIEW_VERSIONS: Final[list[str]] = ["v1", "v2"]
-REVIEW_VERSION_LABELS: Final[dict[str, str]] = {"v1": "⚙️ V1", "v2": "⚙️ V2"}
-DEFAULT_REVIEW_VERSION: Final[str] = "v1"
 SMALL_PHONE_LABEL: Final[str] = "Маленький телефон"
 STATE_KEY_SMALL_PHONE: Final[str] = "bo_small_phone"
 
@@ -62,29 +58,17 @@ async def _small_phone_enabled(state: FSMContext) -> bool:
     return bool(data.get(STATE_KEY_SMALL_PHONE, False))
 
 
-async def _current_review_version(state: FSMContext) -> str:
-    data = await state.get_data()
-    version = data.get(STATE_KEY_REVIEW_VERSION, DEFAULT_REVIEW_VERSION)
-    if version not in REVIEW_VERSIONS:
-        return DEFAULT_REVIEW_VERSION
-    return version
-
-
 async def _processing_keyboard(state: FSMContext):
     review_on = await _review_enabled(state)
-    review_version = await _current_review_version(state)
     small_phone_on = await _small_phone_enabled(state)
 
     label = f"{REVIEW_SELECTED_PREFIX}{REVIEW_LABEL}" if review_on else REVIEW_LABEL
-    version_label = REVIEW_VERSION_LABELS.get(
-        review_version, REVIEW_VERSION_LABELS[DEFAULT_REVIEW_VERSION]
-    )
     small_phone_label = (
         f"{REVIEW_SELECTED_PREFIX}{SMALL_PHONE_LABEL}"
         if small_phone_on
         else SMALL_PHONE_LABEL
     )
-    return await rk_processing([label, version_label, small_phone_label])
+    return await rk_processing([label, small_phone_label])
 
 
 def _user_id(user: UserManager, message: Message) -> int:
@@ -144,7 +128,6 @@ async def _start_bought_out(
     await state.update_data(
         {
             STATE_KEY_REVIEW: False,
-            STATE_KEY_REVIEW_VERSION: DEFAULT_REVIEW_VERSION,
             STATE_KEY_SMALL_PHONE: False,
         }
     )
@@ -155,7 +138,6 @@ async def _start_bought_out(
         "Переключатели:\n"
         "• 🟠 На проверке — удалять плашку.\n"
         "• 📱 Маленький телефон — для узких скринов (например, 750×1334).\n"
-        "• ⚙️ V1/V2 — версия алгоритма (V2: маска и защита слева, V1: базовая).\n"
         "Сервис:\n"
         "• 📂 Файлы — показать очередь.\n"
         "• 🧹 Очистить — удалить загруженное."
@@ -283,33 +265,6 @@ async def toggle_small_phone(
     )
 
 
-@router.message(
-    UserState.send_files_bo,
-    F.text.func(
-        lambda text: (text or "").strip().replace(REVIEW_SELECTED_PREFIX, "")
-        in REVIEW_VERSION_LABELS.values()
-    ),
-)
-async def switch_review_version(
-    message: Message,
-    user: UserManager,
-    state: FSMContext,
-    redis: Redis | None = None,
-) -> None:
-    current = await _current_review_version(state)
-    try:
-        idx = REVIEW_VERSIONS.index(current)
-    except ValueError:
-        idx = 0
-    next_version = REVIEW_VERSIONS[(idx + 1) % len(REVIEW_VERSIONS)]
-    await state.update_data({STATE_KEY_REVIEW_VERSION: next_version})
-    next_label = REVIEW_VERSION_LABELS[next_version]
-    await message.answer(
-        f"Версия алгоритма: {next_label}",
-        reply_markup=await _processing_keyboard(state),
-    )
-
-
 @router.message(UserState.send_files_bo, F.text == BTN_START)
 async def vu_start_cmd(
     message: Message,
@@ -329,7 +284,6 @@ async def vu_start_cmd(
         return
 
     review_on = await _review_enabled(state)
-    review_version = await _current_review_version(state)
     small_phone_on = await _small_phone_enabled(state)
 
     resized_vykupili = new_h = new_w = None
@@ -341,10 +295,9 @@ async def vu_start_cmd(
         shutil.rmtree(clean_dir, ignore_errors=True)
     clean_dir.mkdir(parents=True, exist_ok=True)
 
-    version_tag = review_version.upper() if review_on else ""
     phone_tag = "📱=ON" if small_phone_on else "📱=OFF"
     msg = await message.answer(
-        f"Обработка [0/{len_paths}] • 🟠={'ON' if review_on else 'OFF'} {version_tag} • {phone_tag}"
+        f"Обработка [0/{len_paths}] • 🟠={'ON' if review_on else 'OFF'} • {phone_tag}"
     )
     success = 0
     for i, p in enumerate(paths, start=1):
@@ -358,9 +311,7 @@ async def vu_start_cmd(
             intermediate = Path(p)
 
         if review_on:
-            removed = remove_on_review_badge(
-                str(intermediate), output_dir, version=review_version
-            )
+            removed = remove_on_review_badge(str(intermediate), output_dir)
             final_candidate = output_dir / Path(intermediate).name.lower()
             if not final_candidate.exists() and intermediate.exists():
                 try:
@@ -382,7 +333,7 @@ async def vu_start_cmd(
                 )
 
         await msg.edit_text(
-            f"Обработка [{i}/{len_paths}] • 🟠={'ON' if review_on else 'OFF'} {version_tag} • {phone_tag}"
+            f"Обработка [{i}/{len_paths}] • 🟠={'ON' if review_on else 'OFF'} • {phone_tag}"
         )
 
     if clean_dir.exists():

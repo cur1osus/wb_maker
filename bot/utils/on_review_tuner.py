@@ -5,12 +5,8 @@ import logging
 import os
 import re
 import sys
-from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
-from typing import Final
 
-import numpy as np
 from dotenv import load_dotenv
 
 _PLUGIN_ROOT: Path | None = None
@@ -46,7 +42,11 @@ def _ensure_qt_env() -> None:
 
 
 _ensure_qt_env()
-load_dotenv()
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = REPO_ROOT / ".env"
+
+load_dotenv(dotenv_path=ENV_PATH)
 
 import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -56,286 +56,9 @@ if _PLUGIN_ROOT:
 
 logger = logging.getLogger(__name__)
 
-# Берем актуальные константы из общего модуля, если он доступен.
-try:
-    from on_review import (
-        ASSETS_DIR as DEFAULT_ASSETS_DIR,
-    )
-    from on_review import (
-        ON_REVIEW_CANNY_HIGH,
-        ON_REVIEW_CANNY_LOW,
-        ON_REVIEW_COLOR_MAX_Y_RATIO,
-        ON_REVIEW_COLOR_MIN_AREA_RATIO,
-        ON_REVIEW_COLOR_MIN_RATIO,
-        ON_REVIEW_COLOR_PADDING,
-        ON_REVIEW_HSV_LOWER,
-        ON_REVIEW_HSV_UPPER,
-        ON_REVIEW_TEMPLATE_MAX_Y_RATIO,
-        ON_REVIEW_TEMPLATE_MIN_HEIGHT,
-        ON_REVIEW_TEMPLATE_MIN_WIDTH,
-        ON_REVIEW_TEMPLATE_SCALE_MULTIPLIERS,
-    )
-    from on_review import (
-        ON_REVIEW_GUARD_LEFT_RATIO as DEFAULT_LEFT_GUARD_RATIO,
-    )
-    from on_review import (
-        ON_REVIEW_LEFT_CLAMP_MIN_PX as DEFAULT_LEFT_CLAMP_MIN_PX,
-    )
-    from on_review import (
-        ON_REVIEW_LEFT_CLAMP_RATIO as DEFAULT_LEFT_CLAMP_RATIO,
-    )
-    from on_review import (
-        ON_REVIEW_PADDING_BOTTOM as DEFAULT_PADDING_BOTTOM,
-    )
-    from on_review import (
-        ON_REVIEW_PADDING_TOP as DEFAULT_PADDING_TOP,
-    )
-    from on_review import (
-        ON_REVIEW_PADDING_X as DEFAULT_PADDING_X,
-    )
-    from on_review import (
-        ON_REVIEW_ROI_BELOW_MIN as DEFAULT_ROI_BELOW_MIN,
-    )
-    from on_review import (
-        ON_REVIEW_ROI_BELOW_MULTIPLIER as DEFAULT_ROI_BELOW_MULT,
-    )
-    from on_review import (
-        ON_REVIEW_ROI_EXTRA_WIDTH as DEFAULT_ROI_EXTRA_WIDTH,
-    )
-    from on_review import (
-        ON_REVIEW_ROI_WIDTH_MULTIPLIER as DEFAULT_ROI_WIDTH_MULT,
-    )
-    from on_review import (
-        ON_REVIEW_TEMPLATE_NAME as DEFAULT_TEMPLATE_NAME,
-    )
-    from on_review import (
-        ON_REVIEW_TEMPLATE_THRESHOLD as DEFAULT_TEMPLATE_THRESHOLD,
-    )
-except Exception as exc:  # noqa: BLE001
-    logger.warning("Не удалось загрузить актуальные константы: %s", exc)
-    DEFAULT_PADDING_X = 2
-    DEFAULT_PADDING_TOP = 9
-    DEFAULT_PADDING_BOTTOM = 15
-    DEFAULT_ROI_WIDTH_MULT = 1.6
-    DEFAULT_ROI_EXTRA_WIDTH = 260
-    DEFAULT_ROI_BELOW_MULT = 2
-    DEFAULT_ROI_BELOW_MIN = 65
-    DEFAULT_LEFT_CLAMP_RATIO = 0.15
-    DEFAULT_LEFT_CLAMP_MIN_PX = 12
-    DEFAULT_LEFT_GUARD_RATIO = 0.14
-    DEFAULT_TEMPLATE_THRESHOLD = 0.45
-    DEFAULT_TEMPLATE_NAME = "on_check.jpg"
-    DEFAULT_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-    ON_REVIEW_TEMPLATE_MAX_Y_RATIO = 0.6
-    ON_REVIEW_TEMPLATE_MIN_WIDTH = 80
-    ON_REVIEW_TEMPLATE_MIN_HEIGHT = 20
-    ON_REVIEW_TEMPLATE_SCALE_MULTIPLIERS = (0.5, 0.65, 0.8, 0.95, 1.1, 1.25, 1.4)
-    ON_REVIEW_CANNY_LOW = 40
-    ON_REVIEW_CANNY_HIGH = 120
-    ON_REVIEW_HSV_LOWER: Final[np.ndarray] = np.array([5, 140, 170], dtype=np.uint8)
-    ON_REVIEW_HSV_UPPER: Final[np.ndarray] = np.array([22, 255, 255], dtype=np.uint8)
-    ON_REVIEW_COLOR_MIN_AREA_RATIO: Final[float] = 0.0025
-    ON_REVIEW_COLOR_MIN_RATIO: Final[float] = 3.5
-    ON_REVIEW_COLOR_MAX_Y_RATIO: Final[float] = 0.55
-    ON_REVIEW_COLOR_PADDING: Final[int] = 6
-
-
-@dataclass
-class Params:
-    template_threshold: float = DEFAULT_TEMPLATE_THRESHOLD
-    padding_x: int = DEFAULT_PADDING_X
-    padding_top: int = DEFAULT_PADDING_TOP
-    padding_bottom: int = DEFAULT_PADDING_BOTTOM
-    roi_width_mult: float = DEFAULT_ROI_WIDTH_MULT
-    roi_extra_width: int = DEFAULT_ROI_EXTRA_WIDTH
-    roi_below_mult: int = DEFAULT_ROI_BELOW_MULT
-    roi_below_min: int = DEFAULT_ROI_BELOW_MIN
-    left_clamp_ratio: float = DEFAULT_LEFT_CLAMP_RATIO
-    left_clamp_min_px: int = DEFAULT_LEFT_CLAMP_MIN_PX
-    guard_left_ratio: float = DEFAULT_LEFT_GUARD_RATIO
-
-
-def _resolve_asset(name: str) -> Path:
-    candidates = [
-        DEFAULT_ASSETS_DIR / name,
-        Path.cwd() / name,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return DEFAULT_ASSETS_DIR / name
-
-
-@lru_cache(maxsize=1)
-def _load_on_review_template() -> np.ndarray | None:
-    template_path = _resolve_asset(DEFAULT_TEMPLATE_NAME)
-    template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
-    if template is None:
-        logger.warning("Не удалось загрузить шаблон: %s", template_path)
-        return None
-    return template
-
-
-def _candidate_template_scales(img_w: int, template_w: int) -> tuple[float, ...]:
-    if template_w <= 0:
-        return (1.0,)
-    base = img_w / template_w
-    scales = [base * mult for mult in ON_REVIEW_TEMPLATE_SCALE_MULTIPLIERS]
-    filtered = [s for s in scales if 0.2 <= s <= 1.8]
-    if not filtered:
-        filtered = [min(1.0, base)]
-    return tuple(sorted({round(s, 3) for s in filtered}))
-
-
-def _find_on_review_box_by_color(img: np.ndarray) -> tuple[int, int, int, int] | None:
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, ON_REVIEW_HSV_LOWER, ON_REVIEW_HSV_UPPER)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-
-    h_img, w_img = img.shape[:2]
-    min_area = int(w_img * h_img * ON_REVIEW_COLOR_MIN_AREA_RATIO)
-
-    best: tuple[int, int, int, int, int] | None = None  # area, x, y, w, h
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
-        if area < min_area:
-            continue
-        if w <= 0 or h <= 0:
-            continue
-        if w / h < ON_REVIEW_COLOR_MIN_RATIO:
-            continue
-        if y > h_img * ON_REVIEW_COLOR_MAX_Y_RATIO:
-            continue
-        if best is None or area > best[0]:
-            best = (area, x, y, w, h)
-
-    if best is None:
-        return None
-
-    _, x, y, w, h = best
-    x = max(0, x - ON_REVIEW_COLOR_PADDING)
-    y = max(0, y - ON_REVIEW_COLOR_PADDING)
-    w = min(w_img - x, w + ON_REVIEW_COLOR_PADDING * 2)
-    h = min(h_img - y, h + ON_REVIEW_COLOR_PADDING * 2)
-    return x, y, w, h
-
-
-def _find_on_review_box_by_template(
-    gray: np.ndarray, params: Params
-) -> tuple[int, int, int, int] | None:
-    template = _load_on_review_template()
-    if template is None:
-        return None
-
-    img_h, img_w = gray.shape[:2]
-    template_h, template_w = template.shape[:2]
-    if img_h <= 0 or img_w <= 0 or template_h <= 0 or template_w <= 0:
-        return None
-
-    edges_img = cv2.Canny(gray, ON_REVIEW_CANNY_LOW, ON_REVIEW_CANNY_HIGH)
-
-    best_score = -1.0
-    best_loc = (0, 0)
-    best_size = (0, 0)
-
-    for scale in _candidate_template_scales(img_w, template_w):
-        scaled_w = max(1, int(template_w * scale))
-        scaled_h = max(1, int(template_h * scale))
-        if (
-            scaled_w < ON_REVIEW_TEMPLATE_MIN_WIDTH
-            or scaled_h < ON_REVIEW_TEMPLATE_MIN_HEIGHT
-        ):
-            continue
-        if scaled_w >= img_w or scaled_h >= img_h:
-            continue
-
-        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
-        scaled_template = cv2.resize(
-            template, (scaled_w, scaled_h), interpolation=interp
-        )
-
-        res_gray = cv2.matchTemplate(gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res_gray)
-        if max_val > best_score:
-            best_score = max_val
-            best_loc = max_loc
-            best_size = (scaled_w, scaled_h)
-
-        tmpl_edges = cv2.Canny(
-            scaled_template, ON_REVIEW_CANNY_LOW, ON_REVIEW_CANNY_HIGH
-        )
-        res_edges = cv2.matchTemplate(edges_img, tmpl_edges, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res_edges)
-        if max_val > best_score:
-            best_score = max_val
-            best_loc = max_loc
-            best_size = (scaled_w, scaled_h)
-
-    if best_score < params.template_threshold:
-        return None
-
-    x, y = best_loc
-    w, h = best_size
-    if y > int(img_h * ON_REVIEW_TEMPLATE_MAX_Y_RATIO):
-        return None
-    return x, y, w, h
-
-
-def _find_on_review_box(
-    gray: np.ndarray, bgr: np.ndarray, params: Params
-) -> tuple[int, int, int, int] | None:
-    color_bbox = _find_on_review_box_by_color(bgr)
-    if color_bbox:
-        return color_bbox
-
-    return _find_on_review_box_by_template(gray, params)
-
-
-def _strip_badge(
-    img: np.ndarray, bbox: tuple[int, int, int, int], params: Params
-) -> tuple[np.ndarray, tuple[int, int, int, int]]:
-    x, y, w, h = bbox
-
-    padding_x = params.padding_x
-    padding_top = params.padding_top
-    padding_bottom = params.padding_bottom
-
-    guard_left = int(img.shape[1] * params.guard_left_ratio)
-    left_clip = max(params.left_clamp_min_px, int(w * params.left_clamp_ratio))
-    x1 = max(guard_left, x - padding_x + left_clip)
-    max_x1 = x + int(w * 0.4)
-    x1 = min(x1, max_x1)
-
-    roi_width = max(
-        int(w * params.roi_width_mult),
-        img.shape[1] - x1 if params.roi_extra_width < 0 else w + params.roi_extra_width,
-    )
-    x2 = min(img.shape[1], x1 + roi_width)
-    y1 = max(0, y - padding_top)
-    y2 = min(img.shape[0], y + h + padding_bottom)
-
-    result = img.copy()
-    strip_height = y2 - y1
-    if strip_height > 0:
-        roi_y2 = min(
-            img.shape[0],
-            y2 + max(strip_height * params.roi_below_mult, params.roi_below_min),
-        )
-        roi = result[y1:roi_y2, x1:x2, :]
-        if strip_height < roi.shape[0]:
-            roi[0 : roi.shape[0] - strip_height, :] = roi[strip_height:, :]
-            fill_row = roi[
-                roi.shape[0] - strip_height - 1 : roi.shape[0] - strip_height, :, :
-            ]
-            roi[roi.shape[0] - strip_height :, :] = fill_row
-
-    return result, (x1, y1, x2, y2)
+from on_review import OnReviewParams as Params
+from on_review import find_on_review_box, strip_badge
+from process_bought_out import apply_vykupili_overlay
 
 
 def _format_env_value(value: float | int) -> str:
@@ -459,7 +182,6 @@ class TunerWindow(QtWidgets.QWidget):
         self.img_bgr = cv2.imread(str(image_path))
         if self.img_bgr is None:
             raise RuntimeError(f"Не удалось открыть: {image_path}")
-        self.gray = cv2.cvtColor(self.img_bgr, cv2.COLOR_BGR2GRAY)
 
         self.params = Params()
 
@@ -468,6 +190,11 @@ class TunerWindow(QtWidgets.QWidget):
         self.image_label.setMinimumSize(480, 480)
         self.status_label = QtWidgets.QLabel("...")
         self.status_label.setStyleSheet("font-weight: bold; color: #444;")
+        self.apply_vykupili_checkbox = QtWidgets.QCheckBox("Apply «ВЫКУПИЛИ»")
+        self.apply_vykupili_checkbox.setChecked(True)
+        self.apply_vykupili_checkbox.stateChanged.connect(
+            lambda _=None: self._render_preview()
+        )
 
         self.controls: dict[str, _ParamControl] = {}
         controls_widget = self._build_controls()
@@ -489,6 +216,7 @@ class TunerWindow(QtWidgets.QWidget):
 
         right_layout = QtWidgets.QVBoxLayout()
         right_layout.addWidget(self.status_label)
+        right_layout.addWidget(self.apply_vykupili_checkbox)
         right_layout.addWidget(controls_widget)
         right_layout.addLayout(buttons)
         right_layout.addStretch(1)
@@ -501,7 +229,7 @@ class TunerWindow(QtWidgets.QWidget):
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._render_preview)
 
-        self._last_rgb: np.ndarray | None = None
+        self._last_rgb: object | None = None
         self._render_preview()
 
     def _build_controls(self) -> QtWidgets.QWidget:
@@ -645,13 +373,18 @@ class TunerWindow(QtWidgets.QWidget):
         self._render_timer.start(120)
 
     def _render_preview(self) -> None:
-        bbox = _find_on_review_box(self.gray, self.img_bgr, self.params)
+        work_img = self.img_bgr.copy()
+        if self.apply_vykupili_checkbox.isChecked():
+            work_img, _ = apply_vykupili_overlay(work_img)
+        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        bbox = find_on_review_box(gray, work_img, self.params)
+
         status = "NOT FOUND"
-        preview = self.img_bgr.copy()
+        preview = work_img.copy()
 
         if bbox:
             status = f"FOUND @ {bbox}"
-            preview, _roi_rect = _strip_badge(preview, bbox, self.params)
+            preview = strip_badge(preview, bbox, self.params)
 
         self._last_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
         h, w, _ = self._last_rgb.shape
@@ -689,10 +422,14 @@ class TunerWindow(QtWidgets.QWidget):
 
     def _save_preview(self) -> None:
         target = self.img_path.with_name(f"{self.img_path.stem}_preview.png")
-        bbox = _find_on_review_box(self.gray, self.img_bgr, self.params)
-        preview = self.img_bgr.copy()
+        work_img = self.img_bgr.copy()
+        if self.apply_vykupili_checkbox.isChecked():
+            work_img, _ = apply_vykupili_overlay(work_img)
+        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        bbox = find_on_review_box(gray, work_img, self.params)
+        preview = work_img.copy()
         if bbox:
-            preview, _roi_rect = _strip_badge(preview, bbox, self.params)
+            preview = strip_badge(preview, bbox, self.params)
         rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
         cv2.imwrite(str(target), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
         self.status_label.setText(f"Saved → {target.name}")
@@ -716,8 +453,8 @@ class TunerWindow(QtWidgets.QWidget):
             env_key: _format_env_value(getattr(self.params, param_key))
             for param_key, env_key in env_map.items()
         }
-        _update_env_file(Path(".env"), updates)
-        self.status_label.setText("Saved to .env (restart bot to apply)")
+        _update_env_file(ENV_PATH, updates)
+        self.status_label.setText(f"Saved to {ENV_PATH.name} (restart bot to apply)")
 
     def _set_params_dialog(self) -> None:
         text, ok = QtWidgets.QInputDialog.getMultiLineText(

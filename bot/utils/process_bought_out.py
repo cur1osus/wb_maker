@@ -285,6 +285,60 @@ def process_image_v(
     return True
 
 
+def apply_vykupili_overlay(
+    img: np.ndarray,
+    *,
+    resized_vykupili: np.ndarray | None = None,
+    new_h: int | None = None,
+    new_w: int | None = None,
+    y_offset: int = -5,
+    scale: float = 1.1,
+) -> tuple[np.ndarray, bool]:
+    """Заменяет «ОТКАЗАЛИСЬ» на «ВЫКУПИЛИ» в массиве изображения."""
+
+    assets = _load_assets()
+    if assets is None or img.size == 0:
+        return img.copy(), False
+
+    if resized_vykupili is None or new_h is None or new_w is None:
+        resized_vykupili, new_h, new_w = init_source_bought_out(scale=scale)
+
+    if (
+        resized_vykupili is None
+        or new_h is None
+        or new_w is None
+        or new_h <= 0
+        or new_w <= 0
+        or resized_vykupili.size == 0
+    ):
+        return img.copy(), False
+
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if img_gray.shape[0] < assets.template_h or img_gray.shape[1] < assets.template_w:
+        return img.copy(), False
+
+    res = cv2.matchTemplate(img_gray, assets.otkazalis_template, cv2.TM_CCOEFF_NORMED)
+    loc = np.where(res >= TEMPLATE_THRESHOLD)
+
+    result = img.copy()
+    processed = False
+    for x, y in zip(*loc[::-1]):
+        vx1 = x
+        vx2 = x + new_w
+
+        vy_center = y + (assets.template_h - new_h) // 2
+        vy1 = vy_center + y_offset
+        vy2 = vy1 + new_h
+
+        if vx2 > result.shape[1] or vy2 > result.shape[0] or vx1 < 0 or vy1 < 0:
+            continue
+
+        result[vy1:vy2, vx1:vx2] = resized_vykupili
+        processed = True
+
+    return result, processed
+
+
 def clear_dirs_bought_out(user_id: int | str) -> None:
     input_dir, output_dir = _user_dirs(user_id)
     for folder in (output_dir, input_dir):

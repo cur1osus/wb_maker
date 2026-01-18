@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
@@ -10,7 +11,9 @@ import cv2
 import numpy as np
 from dotenv import load_dotenv
 
-load_dotenv()
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = REPO_ROOT / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +64,6 @@ ON_REVIEW_GUARD_LEFT_RATIO: Final[float] = _env_float(
     "ON_REVIEW_GUARD_LEFT_RATIO", 0.14
 )
 
-# Ветка v1 — параметры из последнего коммита (оригинал без цветовой маски).
-ON_REVIEW_THRESHOLD_V1: Final[int] = 233
-ON_REVIEW_PADDING_X_V1: Final[int] = 37
-ON_REVIEW_PADDING_TOP_V1: Final[int] = 16
-ON_REVIEW_PADDING_BOTTOM_V1: Final[int] = 12
-ON_REVIEW_ROI_WIDTH_MULTIPLIER_V1: Final[float] = 4.0
-ON_REVIEW_ROI_EXTRA_WIDTH_V1: Final[int] = 239  # -1 — до правого края
-ON_REVIEW_ROI_BELOW_MULTIPLIER_V1: Final[int] = 0
-ON_REVIEW_ROI_BELOW_MIN_V1: Final[int] = 151
-
 # Цветовое окно для поиска оранжевой плашки «НА ПРОВЕРКЕ».
 ON_REVIEW_HSV_LOWER: Final[np.ndarray] = np.array([5, 140, 170], dtype=np.uint8)
 ON_REVIEW_HSV_UPPER: Final[np.ndarray] = np.array([22, 255, 255], dtype=np.uint8)
@@ -95,6 +88,21 @@ ON_REVIEW_TEMPLATE_SCALE_MULTIPLIERS: Final[tuple[float, ...]] = (
 )
 ON_REVIEW_CANNY_LOW: Final[int] = 40
 ON_REVIEW_CANNY_HIGH: Final[int] = 120
+
+
+@dataclass
+class OnReviewParams:
+    template_threshold: float = ON_REVIEW_TEMPLATE_THRESHOLD
+    padding_x: int = ON_REVIEW_PADDING_X
+    padding_top: int = ON_REVIEW_PADDING_TOP
+    padding_bottom: int = ON_REVIEW_PADDING_BOTTOM
+    roi_width_mult: float = ON_REVIEW_ROI_WIDTH_MULTIPLIER
+    roi_extra_width: int = ON_REVIEW_ROI_EXTRA_WIDTH
+    roi_below_mult: int = ON_REVIEW_ROI_BELOW_MULTIPLIER
+    roi_below_min: int = ON_REVIEW_ROI_BELOW_MIN
+    left_clamp_ratio: float = ON_REVIEW_LEFT_CLAMP_RATIO
+    left_clamp_min_px: int = ON_REVIEW_LEFT_CLAMP_MIN_PX
+    guard_left_ratio: float = ON_REVIEW_GUARD_LEFT_RATIO
 
 
 def _resolve_asset(name: str) -> Path:
@@ -178,7 +186,7 @@ def _find_on_review_box_by_color(img: np.ndarray) -> tuple[int, int, int, int] |
 
 
 def _find_on_review_box_by_template(
-    gray: np.ndarray,
+    gray: np.ndarray, params: OnReviewParams | None = None
 ) -> tuple[int, int, int, int] | None:
     template = _load_on_review_template()
     if template is None:
@@ -228,7 +236,8 @@ def _find_on_review_box_by_template(
             best_loc = max_loc
             best_size = (scaled_w, scaled_h)
 
-    if best_score < ON_REVIEW_TEMPLATE_THRESHOLD:
+    threshold = params.template_threshold if params else ON_REVIEW_TEMPLATE_THRESHOLD
+    if best_score < threshold:
         return None
 
     x, y = best_loc
@@ -238,8 +247,8 @@ def _find_on_review_box_by_template(
     return x, y, w, h
 
 
-def _find_on_review_box(
-    gray: np.ndarray, bgr: np.ndarray, force_threshold: int | None = None
+def find_on_review_box(
+    gray: np.ndarray, bgr: np.ndarray, params: OnReviewParams | None = None
 ) -> tuple[int, int, int, int] | None:
     """
     Ищет «НА ПРОВЕРКЕ», возвращает bbox (x, y, w, h) или None.
@@ -250,65 +259,50 @@ def _find_on_review_box(
     if color_bbox:
         return color_bbox
 
-    return _find_on_review_box_by_template(gray)
+    return _find_on_review_box_by_template(gray, params)
 
 
-def _find_on_review_box_v1(
-    gray: np.ndarray, force_threshold: int | None = None
+def _find_on_review_box(
+    gray: np.ndarray, bgr: np.ndarray, force_threshold: int | None = None
 ) -> tuple[int, int, int, int] | None:
-    """Версия 1: поиск плашки по шаблону без OCR."""
+    params = OnReviewParams()
+    return find_on_review_box(gray, bgr, params)
 
-    return _find_on_review_box_by_template(gray)
 
-
-def _remove_on_review_badge_v1(
-    input_path: str, output_dir: Path, *, threshold: int | None = None
-) -> bool:
-    """Версия 1 — исходный алгоритм (старые константы, шаблонный поиск)."""
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    img = cv2.imread(input_path)
-    if img is None:
-        logger.info("Не удалось загрузить: %s", input_path)
-        return False
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bbox = _find_on_review_box_v1(gray, force_threshold=threshold)
-    if bbox is None:
-        output_path = output_dir / Path(input_path).name.lower()
-        cv2.imwrite(str(output_path), img)
-        return False
-
+def strip_badge(
+    img: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    params: OnReviewParams | None = None,
+) -> np.ndarray:
+    params = params or OnReviewParams()
     x, y, w, h = bbox
 
-    padding_x = 0 if ON_REVIEW_ROI_EXTRA_WIDTH_V1 < 0 else ON_REVIEW_PADDING_X_V1
-    padding_top = ON_REVIEW_PADDING_TOP_V1
-    padding_bottom = ON_REVIEW_PADDING_BOTTOM_V1
+    padding_x = params.padding_x
+    padding_top = params.padding_top
+    padding_bottom = params.padding_bottom
 
-    x1 = max(0, x - padding_x)
+    guard_left = int(img.shape[1] * params.guard_left_ratio)
+    left_clip = max(params.left_clamp_min_px, int(w * params.left_clamp_ratio))
+    x1 = max(guard_left, x - padding_x + left_clip)
+    max_x1 = x + int(w * 0.4)
+    x1 = min(x1, max_x1)
+
     roi_width = max(
-        int(w * ON_REVIEW_ROI_WIDTH_MULTIPLIER_V1),
-        img.shape[1] - x1
-        if ON_REVIEW_ROI_EXTRA_WIDTH_V1 < 0
-        else w + ON_REVIEW_ROI_EXTRA_WIDTH_V1,
+        int(w * params.roi_width_mult),
+        img.shape[1] - x1 if params.roi_extra_width < 0 else w + params.roi_extra_width,
     )
     x2 = min(img.shape[1], x1 + roi_width)
     y1 = max(0, y - padding_top)
     y2 = min(img.shape[0], y + h + padding_bottom)
 
+    result = img.copy()
     strip_height = y2 - y1
     if strip_height > 0:
         roi_y2 = min(
             img.shape[0],
-            y2
-            + max(
-                strip_height * ON_REVIEW_ROI_BELOW_MULTIPLIER_V1,
-                ON_REVIEW_ROI_BELOW_MIN_V1,
-            ),
+            y2 + max(strip_height * params.roi_below_mult, params.roi_below_min),
         )
-        roi = img[y1:roi_y2, x1:x2, :]
-
+        roi = result[y1:roi_y2, x1:x2, :]
         if strip_height < roi.shape[0]:
             roi[0 : roi.shape[0] - strip_height, :] = roi[strip_height:, :]
             fill_row = roi[
@@ -316,9 +310,7 @@ def _remove_on_review_badge_v1(
             ]
             roi[roi.shape[0] - strip_height :, :] = fill_row
 
-    output_path = output_dir / Path(input_path).name.lower()
-    cv2.imwrite(str(output_path), img)
-    return True
+    return result
 
 
 def _remove_on_review_badge_v2(
@@ -334,56 +326,14 @@ def _remove_on_review_badge_v2(
         return False
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bbox = _find_on_review_box(gray, img, force_threshold=threshold)
+    params = OnReviewParams()
+    bbox = find_on_review_box(gray, img, params)
     if bbox is None:
         output_path = output_dir / Path(input_path).name.lower()
         cv2.imwrite(str(output_path), img)
         return False
 
-    x, y, w, h = bbox
-
-    padding_x = ON_REVIEW_PADDING_X
-    padding_top = ON_REVIEW_PADDING_TOP
-    padding_bottom = ON_REVIEW_PADDING_BOTTOM
-
-    guard_left = int(img.shape[1] * ON_REVIEW_GUARD_LEFT_RATIO)
-    left_clip = max(
-        ON_REVIEW_LEFT_CLAMP_MIN_PX,
-        int(w * ON_REVIEW_LEFT_CLAMP_RATIO),
-    )
-    x1 = max(guard_left, x - padding_x + left_clip)
-
-    max_x1 = x + int(w * 0.4)
-    x1 = min(x1, max_x1)
-
-    roi_width = max(
-        int(w * ON_REVIEW_ROI_WIDTH_MULTIPLIER),
-        img.shape[1] - x1
-        if ON_REVIEW_ROI_EXTRA_WIDTH < 0
-        else w + ON_REVIEW_ROI_EXTRA_WIDTH,
-    )
-    x2 = min(img.shape[1], x1 + roi_width)
-    y1 = max(0, y - padding_top)
-    y2 = min(img.shape[0], y + h + padding_bottom)
-
-    strip_height = y2 - y1
-    if strip_height > 0:
-        roi_y2 = min(
-            img.shape[0],
-            y2
-            + max(
-                strip_height * ON_REVIEW_ROI_BELOW_MULTIPLIER,
-                ON_REVIEW_ROI_BELOW_MIN,
-            ),
-        )
-        roi = img[y1:roi_y2, x1:x2, :]
-
-        if strip_height < roi.shape[0]:
-            roi[0 : roi.shape[0] - strip_height, :] = roi[strip_height:, :]
-            fill_row = roi[
-                roi.shape[0] - strip_height - 1 : roi.shape[0] - strip_height, :, :
-            ]
-            roi[roi.shape[0] - strip_height :, :] = fill_row
+    img = strip_badge(img, bbox, params)
 
     output_path = output_dir / Path(input_path).name.lower()
     cv2.imwrite(str(output_path), img)
@@ -395,10 +345,7 @@ def remove_on_review_badge(
     output_dir: Path,
     *,
     threshold: int | None = None,
-    version: str = "v2",
 ) -> bool:
-    """Прокси: позволяет выбрать версию алгоритма."""
+    """Удаляет плашку «НА ПРОВЕРКЕ» с текущими параметрами."""
 
-    if version == "v1":
-        return _remove_on_review_badge_v1(input_path, output_dir, threshold=threshold)
     return _remove_on_review_badge_v2(input_path, output_dir, threshold=threshold)
