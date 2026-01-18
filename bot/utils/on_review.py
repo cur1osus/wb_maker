@@ -2,46 +2,60 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-import shutil
-import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
 import cv2
 import numpy as np
-import pytesseract
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-SCALE: Final[float] = 3.0
-PSM_MODES: Final[list[int]] = [6, 7, 8, 13]
-ON_REVIEW_RE: Final[re.Pattern[str]] = re.compile(r"НА\s*ПРОВЕРКЕ", re.IGNORECASE)
+ASSETS_DIR: Final[Path] = Path(__file__).resolve().parent / "assets"
+ON_REVIEW_TEMPLATE_NAME: Final[str] = "on_check.jpg"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return int(float(raw.replace(",", ".")))
+        except ValueError:
+            return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw.replace(",", "."))
+    except ValueError:
+        return default
 
 
 # Параметры обработки «НА ПРОВЕРКЕ».
 ON_REVIEW_THRESHOLD: Final[int] = 150  # Базовый порог бинаризации для поиска текста
 ON_REVIEW_THRESHOLDS: Final[list[int]] = [150, 140, 170, 190, 120, 200]
-ON_REVIEW_PADDING_X: Final[int] = 3  # Горизонтальный отступ слева только от текста
-ON_REVIEW_PADDING_TOP: Final[int] = 12  # Отступ сверху относительно текста
-ON_REVIEW_PADDING_BOTTOM: Final[int] = 30  # Отступ снизу относительно текста
-ON_REVIEW_ROI_WIDTH_MULTIPLIER: Final[float] = (
-    1.6  # Во сколько раз расширить ROI от ширины текста
+ON_REVIEW_PADDING_X: Final[int] = _env_int("ON_REVIEW_PADDING_X", 3)
+ON_REVIEW_PADDING_TOP: Final[int] = _env_int("ON_REVIEW_PADDING_TOP", 6)
+ON_REVIEW_PADDING_BOTTOM: Final[int] = _env_int("ON_REVIEW_PADDING_BOTTOM", 18)
+ON_REVIEW_ROI_WIDTH_MULTIPLIER: Final[float] = _env_float(
+    "ON_REVIEW_ROI_WIDTH_MULTIPLIER", 1.6
 )
-ON_REVIEW_ROI_EXTRA_WIDTH: Final[int] = 600  # Доп. ширина вправо
-ON_REVIEW_ROI_BELOW_MULTIPLIER: Final[int] = (
-    2  # Насколько глубоко вниз захватывать контент (множитель высоты строки)
+ON_REVIEW_ROI_EXTRA_WIDTH: Final[int] = _env_int("ON_REVIEW_ROI_EXTRA_WIDTH", 600)
+ON_REVIEW_ROI_BELOW_MULTIPLIER: Final[int] = _env_int(
+    "ON_REVIEW_ROI_BELOW_MULTIPLIER", 2
 )
-ON_REVIEW_ROI_BELOW_MIN: Final[int] = (
-    65  # Минимальная глубина вниз, если множителя не хватает
-)
-ON_REVIEW_LEFT_CLAMP_RATIO: Final[float] = 0.4  # Отсекаем слева, но не забираем фото
-ON_REVIEW_LEFT_CLAMP_MIN_PX: Final[int] = (
-    12  # Минимум пикселей слева, чтобы не задеть картинку
-)
-ON_REVIEW_GUARD_LEFT_RATIO: Final[float] = (
-    0.14  # Доля ширины кадра, которую гарантированно не трогаем слева
+ON_REVIEW_ROI_BELOW_MIN: Final[int] = _env_int("ON_REVIEW_ROI_BELOW_MIN", 65)
+ON_REVIEW_LEFT_CLAMP_RATIO: Final[float] = _env_float("ON_REVIEW_LEFT_CLAMP_RATIO", 0.0)
+ON_REVIEW_LEFT_CLAMP_MIN_PX: Final[int] = _env_int("ON_REVIEW_LEFT_CLAMP_MIN_PX", 0)
+ON_REVIEW_GUARD_LEFT_RATIO: Final[float] = _env_float(
+    "ON_REVIEW_GUARD_LEFT_RATIO", 0.14
 )
 
 # Ветка v1 — параметры из последнего коммита (оригинал без цветовой маски).
@@ -61,86 +75,59 @@ ON_REVIEW_COLOR_MIN_AREA_RATIO: Final[float] = 0.0025  # от площади к�
 ON_REVIEW_COLOR_MIN_RATIO: Final[float] = 3.5  # ширина к высоте
 ON_REVIEW_COLOR_MAX_Y_RATIO: Final[float] = 0.55  # плашка находится в верхней половине
 ON_REVIEW_COLOR_PADDING: Final[int] = 6
+ON_REVIEW_TEMPLATE_THRESHOLD: Final[float] = _env_float(
+    "ON_REVIEW_TEMPLATE_THRESHOLD", 0.45
+)
+ON_REVIEW_TEMPLATE_MAX_Y_RATIO: Final[float] = 0.6
+ON_REVIEW_TEMPLATE_MIN_WIDTH: Final[int] = 80
+ON_REVIEW_TEMPLATE_MIN_HEIGHT: Final[int] = 20
+ON_REVIEW_TEMPLATE_SCALE_MULTIPLIERS: Final[tuple[float, ...]] = (
+    0.5,
+    0.65,
+    0.8,
+    0.95,
+    1.1,
+    1.25,
+    1.4,
+)
+ON_REVIEW_CANNY_LOW: Final[int] = 40
+ON_REVIEW_CANNY_HIGH: Final[int] = 120
 
 
-def _configure_tesseract() -> None:
-    env_cmd = os.environ.get("TESSERACT_CMD")
-    if env_cmd:
-        pytesseract.pytesseract.tesseract_cmd = env_cmd
-        return
-
-    path_cmd = shutil.which("tesseract")
-    if path_cmd:
-        pytesseract.pytesseract.tesseract_cmd = path_cmd
-        return
-
-    if sys.platform.startswith("win"):
-        default_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        if Path(default_cmd).exists():
-            pytesseract.pytesseract.tesseract_cmd = default_cmd
+def _resolve_asset(name: str) -> Path:
+    candidates = [
+        ASSETS_DIR / name,
+        Path.cwd() / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return ASSETS_DIR / name
 
 
-_configure_tesseract()
+@lru_cache(maxsize=1)
+def _load_on_review_template() -> np.ndarray | None:
+    template_path = _resolve_asset(ON_REVIEW_TEMPLATE_NAME)
+    template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
+    if template is None:
+        logger.error(
+            "Не удалось загрузить шаблон '%s': %s",
+            ON_REVIEW_TEMPLATE_NAME,
+            template_path,
+        )
+        return None
+    return template
 
 
-def _run_ocr(pil_img: Image.Image) -> dict:
-    cfg_base = "-c tessedit_char_whitelist=АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ --oem 3"
-    for psm in PSM_MODES:
-        cfg = f"{cfg_base} --psm {psm}"
-        try:
-            return pytesseract.image_to_data(
-                pil_img,
-                config=cfg,
-                lang="rus",
-                output_type=pytesseract.Output.DICT,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("OCR error (psm=%s): %s", psm, exc)
-            continue
-    return {"text": [], "left": [], "top": [], "width": [], "height": []}
-
-
-def _refine_bbox_from_binary(
-    binary: np.ndarray, x: int, y: int, w: int, h: int
-) -> tuple[int, int, int, int]:
-    """
-    Уточняет bbox по бинарной маске, чтобы не тянуть левый блок с фото.
-    Возвращает bbox в координатах `binary`.
-    """
-
-    if w <= 0 or h <= 0:
-        return x, y, w, h
-
-    pad_x = max(4, w // 6)
-    pad_y = max(2, h // 3)
-
-    x0 = max(0, x - pad_x)
-    y0 = max(0, y - pad_y)
-    x1 = min(binary.shape[1], x + w + pad_x)
-    y1 = min(binary.shape[0], y + h + pad_y)
-
-    crop = binary[y0:y1, x0:x1]
-    if crop.size == 0:
-        return x, y, w, h
-
-    white = int(np.count_nonzero(crop))
-    black = crop.size - white
-    text_mask = crop if white <= black else cv2.bitwise_not(crop)
-    mask_bool = text_mask > 0
-
-    col_hits = mask_bool.sum(axis=0)
-    row_hits = mask_bool.sum(axis=1)
-    active_cols = np.flatnonzero(col_hits > mask_bool.shape[0] * 0.1)
-    active_rows = np.flatnonzero(row_hits > mask_bool.shape[1] * 0.1)
-
-    if active_cols.size == 0 or active_rows.size == 0:
-        return x, y, w, h
-
-    left = x0 + int(active_cols[0])
-    right = x0 + int(active_cols[-1])
-    top = y0 + int(active_rows[0])
-    bottom = y0 + int(active_rows[-1])
-    return left, top, max(1, right - left), max(1, bottom - top)
+def _candidate_template_scales(img_w: int, template_w: int) -> tuple[float, ...]:
+    if template_w <= 0:
+        return (1.0,)
+    base = img_w / template_w
+    scales = [base * multiplier for multiplier in ON_REVIEW_TEMPLATE_SCALE_MULTIPLIERS]
+    filtered = [s for s in scales if 0.2 <= s <= 1.8]
+    if not filtered:
+        filtered = [min(1.0, base)]
+    return tuple(sorted({round(s, 3) for s in filtered}))
 
 
 def _find_on_review_box_by_color(img: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -187,109 +174,94 @@ def _find_on_review_box_by_color(img: np.ndarray) -> tuple[int, int, int, int] |
     return x, y, w, h
 
 
+def _find_on_review_box_by_template(
+    gray: np.ndarray,
+) -> tuple[int, int, int, int] | None:
+    template = _load_on_review_template()
+    if template is None:
+        return None
+
+    img_h, img_w = gray.shape[:2]
+    template_h, template_w = template.shape[:2]
+    if img_h <= 0 or img_w <= 0 or template_h <= 0 or template_w <= 0:
+        return None
+
+    edges_img = cv2.Canny(gray, ON_REVIEW_CANNY_LOW, ON_REVIEW_CANNY_HIGH)
+
+    best_score = -1.0
+    best_loc = (0, 0)
+    best_size = (0, 0)
+
+    for scale in _candidate_template_scales(img_w, template_w):
+        scaled_w = max(1, int(template_w * scale))
+        scaled_h = max(1, int(template_h * scale))
+        if (
+            scaled_w < ON_REVIEW_TEMPLATE_MIN_WIDTH
+            or scaled_h < ON_REVIEW_TEMPLATE_MIN_HEIGHT
+        ):
+            continue
+        if scaled_w >= img_w or scaled_h >= img_h:
+            continue
+
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        scaled_template = cv2.resize(
+            template, (scaled_w, scaled_h), interpolation=interp
+        )
+
+        res_gray = cv2.matchTemplate(gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res_gray)
+        if max_val > best_score:
+            best_score = max_val
+            best_loc = max_loc
+            best_size = (scaled_w, scaled_h)
+
+        tmpl_edges = cv2.Canny(
+            scaled_template, ON_REVIEW_CANNY_LOW, ON_REVIEW_CANNY_HIGH
+        )
+        res_edges = cv2.matchTemplate(edges_img, tmpl_edges, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res_edges)
+        if max_val > best_score:
+            best_score = max_val
+            best_loc = max_loc
+            best_size = (scaled_w, scaled_h)
+
+    if best_score < ON_REVIEW_TEMPLATE_THRESHOLD:
+        return None
+
+    x, y = best_loc
+    w, h = best_size
+    if y > int(img_h * ON_REVIEW_TEMPLATE_MAX_Y_RATIO):
+        return None
+    return x, y, w, h
+
+
 def _find_on_review_box(
     gray: np.ndarray, bgr: np.ndarray, force_threshold: int | None = None
 ) -> tuple[int, int, int, int] | None:
     """
     Ищет «НА ПРОВЕРКЕ», возвращает bbox (x, y, w, h) или None.
-    Пробуем несколько порогов и инверсий для высокой устойчивости.
+    Приоритет: цветовая маска -> совпадение по шаблону.
     """
 
     color_bbox = _find_on_review_box_by_color(bgr)
     if color_bbox:
         return color_bbox
 
-    resized = cv2.resize(gray, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_CUBIC)
-    thresholds: list[int] = []
-    if force_threshold is not None:
-        thresholds.append(force_threshold)
-    thresholds.extend(t for t in ON_REVIEW_THRESHOLDS if t not in thresholds)
-
-    tried: set[tuple[int, bool]] = set()
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-
-    for thr in thresholds:
-        for invert in (True, False):
-            key = (thr, invert)
-            if key in tried:
-                continue
-            tried.add(key)
-
-            flag = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-            _, binary = cv2.threshold(resized, thr, 255, flag)
-            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-            pil_img = Image.fromarray(cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB))
-            ocr = _run_ocr(pil_img)
-
-            texts = ocr.get("text", [])
-            for i, raw_text in enumerate(texts):
-                text = (raw_text or "").strip()
-                if not text or not ON_REVIEW_RE.search(text):
-                    continue
-
-                x_raw = int(ocr["left"][i])
-                y_raw = int(ocr["top"][i])
-                w_raw = int(ocr["width"][i])
-                h_raw = int(ocr["height"][i])
-
-                refined = _refine_bbox_from_binary(binary, x_raw, y_raw, w_raw, h_raw)
-                x_r, y_r, w_r, h_r = refined
-
-                x = int(x_r / SCALE)
-                y = int(y_r / SCALE)
-                w = int(w_r / SCALE)
-                h = int(h_r / SCALE)
-                return x, y, w, h
-
-    return None
+    return _find_on_review_box_by_template(gray)
 
 
 def _find_on_review_box_v1(
     gray: np.ndarray, force_threshold: int | None = None
 ) -> tuple[int, int, int, int] | None:
-    """Версия 1: ровно как в последнем коммите — один порог, без уточнений и цвета."""
+    """Версия 1: поиск плашки по шаблону без OCR."""
 
-    resized = cv2.resize(gray, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_CUBIC)
-    thr = force_threshold if force_threshold is not None else ON_REVIEW_THRESHOLD_V1
-    _, thresh_inv = cv2.threshold(resized, thr, 255, cv2.THRESH_BINARY_INV)
-    pil_for_ocr = Image.fromarray(cv2.cvtColor(thresh_inv, cv2.COLOR_GRAY2RGB))
-
-    for psm in PSM_MODES:
-        cfg = (
-            f"--oem 3 --psm {psm} "
-            "-c tessedit_char_whitelist=АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя "
-        )
-        try:
-            ocr = pytesseract.image_to_data(
-                pil_for_ocr,
-                config=cfg,
-                lang="rus",
-                output_type=pytesseract.Output.DICT,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("OCR error (psm=%s): %s", psm, exc)
-            continue
-
-        texts = ocr.get("text", [])
-        for i, raw_text in enumerate(texts):
-            text = (raw_text or "").strip()
-            if not text or not ON_REVIEW_RE.search(text):
-                continue
-
-            x = int(ocr["left"][i] / SCALE)
-            y = int(ocr["top"][i] / SCALE)
-            w = int(ocr["width"][i] / SCALE)
-            h = int(ocr["height"][i] / SCALE)
-            return x, y, w, h
-
-    return None
+    return _find_on_review_box_by_template(gray)
 
 
 def _remove_on_review_badge_v1(
     input_path: str, output_dir: Path, *, threshold: int | None = None
 ) -> bool:
-    """Версия 1 — исходный алгоритм (OCR-only, старые константы)."""
+    """Версия 1 — исходный алгоритм (старые константы, шаблонный поиск)."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,12 +321,7 @@ def _remove_on_review_badge_v1(
 def _remove_on_review_badge_v2(
     input_path: str, output_dir: Path, *, threshold: int | None = None
 ) -> bool:
-    """Версия 2 — с цветовой маской, уточнением bbox и защитой слева."""
-
-    """
-    Убирает надпись «НА ПРОВЕРКЕ» и сдвигает содержимое под ней вверх.
-    Результат сохраняется в `output_dir/<имя_файла>`.
-    """
+    """Версия 2 — с цветовой маской и шаблонным поиском."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -383,7 +350,6 @@ def _remove_on_review_badge_v2(
     )
     x1 = max(guard_left, x - padding_x + left_clip)
 
-    # Не уходим слишком далеко вправо — оставляем до 40% ширины текста.
     max_x1 = x + int(w * 0.4)
     x1 = min(x1, max_x1)
 

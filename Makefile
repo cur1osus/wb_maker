@@ -18,6 +18,6 @@ format:
 	uv run isort --settings-file pyproject.toml $(app-dir)
 
 
-.PHONY: tuner-gui
-tuner-gui:
-	uv run --extra tuner bot/utils/on_review_tuner.py test4.jpg
+.PHONY: tuner-gui-img
+tuner-gui-img:
+	uv run --extra tuner bot/utils/on_review_tuner.py $(IMG)
